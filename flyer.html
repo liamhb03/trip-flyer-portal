@@ -202,7 +202,7 @@
   <div class="portal-actions">
     <button class="btn btn-primary" id="downloadBtn">Download PDF</button>
   </div>
-  <div class="hint">Click text to edit it. Click a photo panel to upload your own image. Click a bullet icon to change it. On the map, use "Add Stop" then click the map — a rename dialog opens automatically. Click any pin to rename or remove it. Arrows show travel direction between stops.</div>
+  <div class="hint">Click text to edit it. Click a photo panel to upload your own image. Click a bullet icon to change it. On the map, use "Add Stop" then click the map — a rename dialog opens automatically. Click any pin to rename or remove it. Arrows show travel direction between stops. Your edits are saved automatically in this browser.</div>
 </div>
 
 <div id="iconPopover" class="no-print">
@@ -574,6 +574,145 @@
 </div>
 
 <script>
+  const PERSIST_KEY = 'tripFlyerPortal_v1';
+  const LIST_IDS = ['berlin-inc-a','berlin-inc-b','berlin-itin-list','quebec-inc-a','quebec-inc-b','quebec-itin-list'];
+  let saveTimer = null;
+  let savedState = null;
+
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY);
+    if(raw) savedState = JSON.parse(raw);
+  } catch(err){
+    console.warn('Could not read saved flyer state', err);
+  }
+
+  function scheduleSave(){
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveState, 400);
+  }
+
+  function editKey(el){
+    if(el.id) return '#'+el.id;
+    const page = el.closest('.flyer-page');
+    if(!page || !page.id) return null;
+    const peers = [...page.querySelectorAll('[contenteditable="true"]')].filter(e=>!e.closest('.check-list'));
+    const idx = peers.indexOf(el);
+    return idx >= 0 ? page.id+'@'+idx : null;
+  }
+
+  function collectEdits(){
+    const edits = {};
+    document.querySelectorAll('.flyer-page [contenteditable="true"]').forEach(el=>{
+      if(el.closest('.check-list')) return;
+      const key = editKey(el);
+      if(key) edits[key] = el.innerHTML;
+    });
+    return edits;
+  }
+
+  function collectLists(){
+    const lists = {};
+    LIST_IDS.forEach(id=>{
+      const ul = document.getElementById(id);
+      if(!ul) return;
+      lists[id] = [...ul.querySelectorAll('li')].map(li=>({
+        icon: li.querySelector('.dot')?.textContent || '\u2713',
+        text: li.querySelector('.li-text')?.innerHTML || ''
+      }));
+    });
+    return lists;
+  }
+
+  function collectImages(){
+    const images = {};
+    document.querySelectorAll('.img-slot').forEach(slot=>{
+      if(!slot.id || !slot.classList.contains('has-image')) return;
+      const m = (slot.style.backgroundImage || '').match(/url\(["']?(.*?)["']?\)/);
+      if(m && m[1]) images[slot.id] = m[1];
+    });
+    return images;
+  }
+
+  function collectMaps(){
+    const maps = {
+      berlin: berlinPoints.map(p=>({lat:p.lat, lng:p.lng, label:p.label})),
+      quebec: quebecPoints.map(p=>({lat:p.lat, lng:p.lng, label:p.label}))
+    };
+    if(!quebecMap && savedState?.maps?.quebec?.length) maps.quebec = savedState.maps.quebec;
+    return maps;
+  }
+
+  function saveState(){
+    try {
+      const state = {
+        v: 1,
+        activeTab: document.querySelector('.tab-btn.active')?.dataset.target || 'berlin',
+        edits: collectEdits(),
+        lists: collectLists(),
+        images: collectImages(),
+        maps: collectMaps()
+      };
+      localStorage.setItem(PERSIST_KEY, JSON.stringify(state));
+      savedState = state;
+    } catch(err){
+      console.warn('Could not save flyer state', err);
+    }
+  }
+
+  function restoreList(ulId, items){
+    const ul = document.getElementById(ulId);
+    if(!ul || !Array.isArray(items)) return;
+    ul.innerHTML = '';
+    items.forEach(item=>{
+      const li = document.createElement('li');
+      li.innerHTML = '<button class="dot"></button><span class="li-text edit" contenteditable="true"></span><button class="li-remove no-print">&times;</button>';
+      li.querySelector('.dot').textContent = item.icon || '\u2713';
+      li.querySelector('.li-text').innerHTML = item.text || '';
+      ul.appendChild(li);
+    });
+  }
+
+  function applyDomState(state){
+    if(!state) return;
+    LIST_IDS.forEach(id=>{ if(state.lists && state.lists[id]) restoreList(id, state.lists[id]); });
+    if(state.edits){
+      document.querySelectorAll('.flyer-page [contenteditable="true"]').forEach(el=>{
+        if(el.closest('.check-list')) return;
+        const key = editKey(el);
+        if(key && Object.prototype.hasOwnProperty.call(state.edits, key)) el.innerHTML = state.edits[key];
+      });
+    }
+    if(state.images){
+      Object.keys(state.images).forEach(id=>{
+        const slot = document.getElementById(id);
+        const src = state.images[id];
+        if(slot && src){
+          slot.style.backgroundImage = 'url("'+src.replace(/\\/g, '\\\\').replace(/"/g, '\\"')+'")';
+          slot.classList.add('has-image');
+        }
+      });
+    }
+    if(state.activeTab && state.activeTab !== 'berlin'){
+      document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.target === state.activeTab));
+      document.querySelectorAll('.flyer-set').forEach(s=>s.classList.toggle('active', s.id === 'set-'+state.activeTab));
+    }
+  }
+
+  function stopsForMap(mapKey){
+    const saved = savedState?.maps?.[mapKey];
+    if(saved && saved.length) return saved;
+    return DEFAULT_STOPS[mapKey].map(d=>({lat:d[0], lng:d[1], label:d[2]}));
+  }
+
+  function setupAutoSave(){
+    document.addEventListener('input', function(e){
+      if(e.target.closest('.flyer-set') || e.target.id === 'customIconInput') scheduleSave();
+    });
+    document.addEventListener('blur', function(e){
+      if(e.target.matches && e.target.matches('.flyer-page [contenteditable="true"]')) scheduleSave();
+    }, true);
+  }
+
   // ---- Tabs ----
   document.querySelectorAll('.tab-btn').forEach(btn=>{
     btn.addEventListener('click', ()=>{
@@ -588,6 +727,7 @@
       } else {
         setTimeout(()=>{ if(berlinMap) berlinMap.invalidateSize(); }, 60);
       }
+      scheduleSave();
     });
   });
 
@@ -601,6 +741,7 @@
       const slot = document.getElementById(slotId);
       slot.style.backgroundImage = "url('"+e.target.result+"')";
       slot.classList.add('has-image');
+      scheduleSave();
     };
     reader.readAsDataURL(file);
   }
@@ -629,6 +770,7 @@
     const span = li.querySelector('.li-text');
     span.focus();
     document.getSelection().selectAllChildren(span);
+    scheduleSave();
   }
 
   document.addEventListener('click', function(e){
@@ -642,6 +784,7 @@
     if(t.classList && t.classList.contains('li-remove')){
       e.stopPropagation();
       t.closest('li').remove();
+      scheduleSave();
       return;
     }
     if(t.classList && t.classList.contains('add-item-btn')){
@@ -655,12 +798,14 @@
       if(t.dataset && t.dataset.icon){
         if(activeDotBtn) activeDotBtn.textContent = t.dataset.icon;
         pop.style.display = 'none';
+        scheduleSave();
       } else if(t.id === 'applyCustomIconBtn'){
         const input = document.getElementById('customIconInput');
         const v = input.value.trim();
         if(activeDotBtn && v) activeDotBtn.textContent = v;
         input.value = '';
         pop.style.display = 'none';
+        scheduleSave();
       }
       return;
     }
@@ -787,6 +932,7 @@
     marker.setTooltipContent(point.label);
     marker.setPopupContent(popupHtml(point.label));
     marker.closePopup();
+    scheduleSave();
   }
 
   function wirePopup(marker, point, mapKey){
@@ -822,6 +968,7 @@
       point.lat = p.lat; point.lng = p.lng;
       updateLine(mapKey);
     });
+    marker.on('dragend', scheduleSave);
 
     wirePopup(marker, point, mapKey);
     updateLine(mapKey);
@@ -829,6 +976,7 @@
     if(autoEdit){
       setTimeout(function(){ marker.openPopup(); }, 80);
     }
+    scheduleSave();
     return marker;
   }
 
@@ -840,6 +988,7 @@
     if(i > -1) arr.splice(i,1);
     updateLine(mapKey);
     renumberMarkers(mapKey);
+    scheduleSave();
   }
 
   function resetRoute(mapKey){
@@ -853,6 +1002,7 @@
     DEFAULT_STOPS[mapKey].forEach(d=> addMarker(mapKey, d[0], d[1], d[2]));
     const b = L.latLngBounds(arr.map(p=>[p.lat,p.lng]));
     map.fitBounds(b, {padding:[26,26]});
+    scheduleSave();
   }
 
   function setAddStopArmed(mapKey, val){
@@ -874,7 +1024,7 @@
   function initBerlinMap(){
     berlinMap = L.map('berlin-leaflet-map', {scrollWheelZoom:false, preferCanvas:true}).setView([53.0,13.5],6);
     tileLayerFor(berlinMap);
-    DEFAULT_STOPS.berlin.forEach(d=> addMarker('berlin', d[0], d[1], d[2]));
+    stopsForMap('berlin').forEach(s=> addMarker('berlin', s.lat, s.lng, s.label));
     const b = L.latLngBounds(berlinPoints.map(p=>[p.lat,p.lng]));
     berlinMap.fitBounds(b, {padding:[26,26]});
     berlinMap.on('click', function(e){
@@ -887,7 +1037,7 @@
   function initQuebecMap(){
     quebecMap = L.map('quebec-leaflet-map', {scrollWheelZoom:false, preferCanvas:true}).setView([45.5,-70.8],6);
     tileLayerFor(quebecMap);
-    DEFAULT_STOPS.quebec.forEach(d=> addMarker('quebec', d[0], d[1], d[2]));
+    stopsForMap('quebec').forEach(s=> addMarker('quebec', s.lat, s.lng, s.label));
     const b = L.latLngBounds(quebecPoints.map(p=>[p.lat,p.lng]));
     quebecMap.fitBounds(b, {padding:[26,26]});
     quebecMap.on('click', function(e){
@@ -908,7 +1058,15 @@
     resetRoute('quebec');
   });
 
-  window.addEventListener('load', ()=>{ initBerlinMap(); });
+  window.addEventListener('load', ()=>{
+    applyDomState(savedState);
+    initBerlinMap();
+    if(savedState?.activeTab === 'quebec'){
+      initQuebecMap();
+      setTimeout(()=>{ if(quebecMap) quebecMap.invalidateSize(); }, 60);
+    }
+    setupAutoSave();
+  });
 
   // ---- PDF export ----
   async function downloadActiveFlyerAsPdf(){
@@ -921,6 +1079,7 @@
 
     if(document.activeElement) document.activeElement.blur();
     document.getElementById('iconPopover').style.display = 'none';
+    saveState();
 
     const { jsPDF } = window.jspdf;
     let pdf = null;
