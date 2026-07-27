@@ -2,3 +2,8 @@
 __pycache__/
 .DS_Store
 *.pyc
+*.docx
+*.txt
+apply_todo.py
+todo.md
+v4/
